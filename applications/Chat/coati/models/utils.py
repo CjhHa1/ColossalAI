@@ -19,7 +19,7 @@ def compute_approx_kl(log_probs: torch.Tensor,
         action_mask: Mask for actions.
     """
 
-    log_ratio = log_probs - log_probs_base
+    log_ratio = log_probs_base - log_probs
     approx_kl = (log_ratio.exp() - 1) - log_ratio
     if action_mask is not None:
         approx_kl = masked_mean(approx_kl, action_mask, dim=1)
@@ -46,10 +46,7 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.T
     return log_probs_labels.squeeze(-1)
 
 
-def calc_action_log_probs(output: torch.Tensor,
-                          sequences: torch.LongTensor,
-                          num_actions: int
-                          ) -> torch.Tensor:
+def calc_action_log_probs(output: torch.Tensor, sequences: torch.LongTensor, num_actions: int) -> torch.Tensor:
     """Calculate action log probs.
 
     Args:
