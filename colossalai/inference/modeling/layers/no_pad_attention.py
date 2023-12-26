@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 
 import torch
@@ -6,28 +7,58 @@ from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb
 
 
-def copy_to_cache(source, cache, lengths, block_tables):
+def copy_to_cache(source, cache, lengths, block_tables, type:str = "prefill"):
     """
     Func: copy key/value into key/value cache.
 
-    Args:   key/value: shape [bsz,seq_len,num_heads,head_size]
+    Args:   key/value(source): shape [bsz,seq_len,num_heads,head_size]
             cache: shape [num_blocks, num_heads, head_size, block_size]
+            lengths: key/value lengths
+            block_tables
     """
-    bsz, max_seq_len = block_tables.shape
     num_blocks, num_heads, head_size, block_size = cache.shape
+    bsz, max_seq_len = block_tables.shape
     needed_blocks = (lengths + block_size - 1) // block_size
-    for i in range(bsz):
-        seq_len = lengths[i]
-        block_num = needed_blocks[i]
-        token_id = 0
-        for block_idx in range(block_num - 1):
-            cache[block_tables[i][block_idx]] = source[i][token_id : token_id + block_size].permute(1, 2, 0)
-            token_id += block_size
-        cache[block_tables[i][block_num - 1]] = source[i][token_id:seq_len].permute(1, 2, 0)
+
+    if type == 'prefill':
+        for i in range(bsz):
+            seq_len = lengths[i]
+            block_num = needed_blocks[i]
+            token_id = 0
+            for block_idx in range(block_num - 1):
+                cache[block_tables[i][block_idx]] = source[i][token_id : token_id + block_size].permute(1, 2, 0)
+                token_id += block_size
+            cache[block_tables[i][block_num - 1]] = source[i][token_id:seq_len].permute(1, 2, 0)
+    elif type == 'decoding':
+        assert len(source[0]) == 1,"seq_len should be equal to 1 when decoding."
+        slot_idx = (lengths + block_size -1) % block_size
+        cache[block_tables[:,needed_blocks - 1],:,:,slot_idx[i]] = source.permute(1, 2, 0)
+
     return cache
 
+def convert_kvcache(source, cache, lengths,  block_tables):
+    """
+    Func: convert key/value cache for calculation
 
-class NoPadPagedAttention(nn.Module):
+    Args:   key/value(source): shape [bsz, 1, num_heads, head_size]
+            cache: shape [num_blocks, num_heads, head_size, block_size]
+            lengths: key/value length
+            block_tables
+    """
+    num_blocks, num_heads, head_size, block_size = cache.shape
+    needed_blocks = (lengths + block_size - 1) // block_size
+    num_remaing_tokens =lengths % block_size
+    bsz = block_tables.shape[0]
+    max_len_in_batch = max(lengths)
+    padded_cache=[]
+    for i in range(bsz):
+        _cache =torch.cat(cache[block_tables[i][needed_blocks[i]-1]].reshape(-1,num_heads,head_size),\
+                          cache[block_tables[i][needed_blocks[i]],:,:,num_remaing_tokens[i]].reshape(-1,num_heads,head_size),dim=0)
+        concat_cache =torch.cat(_cache,source,dim=0)
+        padded_cache.append(concat_cache)
+    return torch.tensor(padded_cache)
+
+class PagedAttention(nn.Module):
     """
     Pure Torch implementation version of paged_attention.
     """
@@ -64,7 +95,7 @@ class NoPadPagedAttention(nn.Module):
         padding_mask = range_tensor < lengths.unsqueeze(1)
         return padding_mask
 
-    def forward(
+    def nopad_context_forward(
         self,
         q: torch.Tensor,  # [num_tokens, num_heads, head_size]
         k: torch.Tensor,
@@ -89,6 +120,53 @@ class NoPadPagedAttention(nn.Module):
 
         cos, sin = self.rotary_emb(value, max_seq_len)
         query, value = apply_rotary_pos_emb(query, key, cos, sin)
+
+        attn_weights = torch.matmul(query,key.transpose(2,3))/math.sqrt(head_size)
+
+        if attn_weights.size() != (bsz,num_heads,max_seq_len,head_size):
+            raise ValueError(
+                f"Got wrong attn_weights, should be in shape {(bsz,num_heads,max_seq_len,head_size)}."
+            )
+
+        if attn_mask is not None:
+            attn_weights+= attn_mask
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+        # attn_weights = nn.functional.dropout(attn_weights,p=self.attention_dropout,training=False) maybe useless
+        attn_output = torch.matmul(attn_weights,value)
+
+        if attn_output.size() != (bsz,num_heads,max_seq_len,head_size):
+            raise ValueError(
+                f"Got wrong attn_output, should be in shape {(bsz,num_heads,max_seq_len,head_size)}."
+            )
+        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz,max_seq_len,-1)
+
+        return attn_output
+
+    def pad_decoding_forward(
+        self,
+        q: torch.Tensor,  # [bsz, 1, num_heads, head_size]
+        k: torch.Tensor,
+        v: torch.Tensor,
+        k_cache: torch.Tensor,  # [num_blocks, num_heads, head_size, block_size]
+        v_cache: torch.Tensor,
+        lengths: torch.Tensor,  # [num_seqs]: input_lengths + output_lengths
+        block_tables: torch.Tensor,  # [num_seqs,max_blocks_per_sequence]
+    ):
+        bsz, seq_len, num_heads, head_size = q.shape
+        assert q.shape[0] == k.shape[0] == v.shape[0] == block_tables.shape[0]
+        max_seq_len = block_tables.shape[-1]
+        shape = (bsz, max_seq_len, num_heads, head_size)
+        key =
+
+        attn_mask = AttentionMaskConverter._make_causal_mask(q.shape, q.dtype, q.device, past_key_values_length=seq_len)
+        self.generate_padding_mask(lengths, max_seq_len)
+        cos, sin = self.rotary_emb(v, max_seq_len)
+        query, key = apply_rotary_pos_emb(q, k, cos, sin)
+        attn_weights = torch.matmul(query,key.transpose(2,3))/math.sqrt(head_size)
+
+
+
 
 
 def test_copy():
