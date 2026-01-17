@@ -10,10 +10,11 @@ import colossalai
 from colossalai.booster import Booster
 from colossalai.booster.plugin import TorchDDPPlugin
 from colossalai.interface import OptimizerWrapper
-from colossalai.testing import rerun_if_address_is_in_use, spawn
-from tests.kit.model_zoo import model_zoo
+from colossalai.testing import clear_cache_before_run, rerun_if_address_is_in_use, spawn
+from tests.kit.model_zoo import COMMON_MODELS, IS_FAST_TEST, model_zoo
 
 
+@clear_cache_before_run()
 def run_fn(model_fn, data_gen_fn, output_transform_fn):
     plugin = TorchDDPPlugin()
     booster = Booster(plugin=plugin)
@@ -22,7 +23,7 @@ def run_fn(model_fn, data_gen_fn, output_transform_fn):
     criterion = lambda x: x.mean()
     data = data_gen_fn()
 
-    data = {k: v.to('cuda') if torch.is_tensor(v) or 'Tensor' in v.__class__.__name__ else v for k, v in data.items()}
+    data = {k: v.to("cuda") if torch.is_tensor(v) or "Tensor" in v.__class__.__name__ else v for k, v in data.items()}
 
     model, optimizer, criterion, _, _ = booster.boost(model, optimizer, criterion)
 
@@ -40,15 +41,19 @@ def run_fn(model_fn, data_gen_fn, output_transform_fn):
 
 
 def check_torch_ddp_plugin():
-    for name, (model_fn, data_gen_fn, output_transform_fn, _, _) in model_zoo.items():
-        if name == 'dlrm_interactionarch':
+    if IS_FAST_TEST:
+        registry = model_zoo.get_sub_registry(COMMON_MODELS)
+    else:
+        registry = model_zoo
+
+    for name, (model_fn, data_gen_fn, output_transform_fn, _, _) in registry.items():
+        if name in ("dlrm_interactionarch", "transformers_mixtral") or name.startswith("simple_"):
             continue
         run_fn(model_fn, data_gen_fn, output_transform_fn)
         torch.cuda.empty_cache()
 
 
 class DummyModel(nn.Module):
-
     def __init__(self):
         super().__init__()
         self.weight = nn.Parameter(torch.rand(1))
@@ -64,13 +69,12 @@ def check_torch_ddp_no_sync():
     model = DummyModel()
     criterion = lambda x: x.mean()
     optimizer = SGD(model.parameters(), lr=1e-3)
-    # create a custom dasetset with 0 to 10
+    # create a custom dataset with 0 to 10
     dataset = torch.arange(0, 10)
     train_dataloader = plugin.prepare_dataloader(dataset, batch_size=2)
-    model, optimizer, criterion, train_dataloader, _ = booster.boost(model,
-                                                                     optimizer,
-                                                                     criterion,
-                                                                     dataloader=train_dataloader)
+    model, optimizer, criterion, train_dataloader, _ = booster.boost(
+        model, optimizer, criterion, dataloader=train_dataloader
+    )
 
     def fwd_bwd():
         output = model(batch.cuda())
@@ -105,7 +109,7 @@ def check_torch_ddp_no_sync():
 
 def run_dist(rank, world_size, port):
     # init dist env
-    colossalai.launch(config=dict(), rank=rank, world_size=world_size, port=port, host='localhost')
+    colossalai.launch(rank=rank, world_size=world_size, port=port, host="localhost")
     check_torch_ddp_plugin()
     check_torch_ddp_no_sync()
 

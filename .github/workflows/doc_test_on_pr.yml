@@ -15,13 +15,13 @@ jobs:
     if: |
       github.event.pull_request.draft == false &&
       github.event.pull_request.base.repo.full_name == 'hpcaitech/ColossalAI' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ubuntu-latest]
     outputs:
       any_changed: ${{ steps.changed-files.outputs.any_changed }}
       changed_files: ${{ steps.changed-files.outputs.all_changed_files }}
     concurrency:
-      group: ${{ github.head_ref }}
-      cancel-in-progress: false
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-detect-change
+      cancel-in-progress: true
     name: Detect changed example files
     steps:
       - uses: actions/checkout@v3
@@ -54,17 +54,17 @@ jobs:
       needs.detect-changed-doc.outputs.any_changed == 'true'
     name: Test the changed Doc
     needs: detect-changed-doc
-    runs-on: [self-hosted, gpu]
+    runs-on: [self-hosted, ubuntu-latest]
     container:
-      image: hpcaitech/pytorch-cuda:1.12.0-11.3.0
+      image: image-cloud.luchentech.com/hpcaitech/pytorch-cuda:2.2.2-12.1.0
       options: --gpus all --rm
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
     concurrency:
-      group: ${{ github.head_ref }}
-      cancel-in-progress: false
+      group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-run-doctest
+      cancel-in-progress: true
     steps:
       - name: Checkout ColossalAI-Documentation
         uses: actions/checkout@v2
@@ -89,7 +89,7 @@ jobs:
       - name: Install ColossalAI
         run: |
           source activate pytorch
-          pip install -v .
+          BUILD_EXT=1 pip install -v -e .
 
       - name: Test the Doc
         run: |

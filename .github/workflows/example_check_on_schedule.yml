@@ -10,7 +10,7 @@ jobs:
   matrix_preparation:
     if: github.repository == 'hpcaitech/ColossalAI'
     name: Prepare matrix for weekly check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ubuntu-latest]
     outputs:
       matrix: ${{ steps.setup-matrix.outputs.matrix }}
     steps:
@@ -29,20 +29,21 @@ jobs:
     if: github.repository == 'hpcaitech/ColossalAI'
     name: Weekly check all examples
     needs: matrix_preparation
-    runs-on: [self-hosted, gpu]
+    runs-on: [self-hosted, ubuntu-latest]
     strategy:
       fail-fast: false
       matrix: ${{fromJson(needs.matrix_preparation.outputs.matrix)}}
     container:
-      image: hpcaitech/pytorch-cuda:1.12.0-11.3.0
-    timeout-minutes: 10
+      image: image-cloud.luchentech.com/hpcaitech/pytorch-cuda:2.2.2-12.1.0
+      options: --gpus all --rm -v /data/scratch/examples-data:/data/ -v /dev/shm
+    timeout-minutes: 30
     steps:
       - name: 📚 Checkout
         uses: actions/checkout@v3
 
       - name: Install Colossal-AI
         run: |
-          pip install -v .
+          BUILD_EXT=1 pip install -v -e .
 
       - name: Traverse all files
         run: |
@@ -50,8 +51,6 @@ jobs:
           echo "Testing ${example_dir} now"
           cd "${PWD}/examples/${example_dir}"
           bash test_ci.sh
-        env:
-          NCCL_SHM_DISABLE: 1
 
       - name: Notify Lark
         id: message-preparation

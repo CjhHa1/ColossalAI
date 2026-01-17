@@ -10,7 +10,7 @@ jobs:
   matrix_preparation:
     name: Prepare Container List
     if: github.repository == 'hpcaitech/ColossalAI'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ubuntu-latest]
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -24,7 +24,7 @@ jobs:
   build:
     name: Release bdist wheels
     needs: matrix_preparation
-    runs-on: [self-hosted, gpu]
+    runs-on: [self-hosted, ubuntu-latest]
     strategy:
       fail-fast: false
       matrix: ${{fromJson(needs.matrix_preparation.outputs.matrix)}}
@@ -51,4 +51,4 @@ jobs:
 
       - name: Build
         run: |
-          CUDA_EXT=1 pip install -v .
+          BUILD_EXT=1 pip install -v -e .

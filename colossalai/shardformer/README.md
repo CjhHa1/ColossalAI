@@ -30,11 +30,12 @@
 
 ### Quick Start
 
-The sample API usage is given below:
+The sample API usage is given below(If you enable the use of flash attention, please install `flash_attn`. In addition, xformers's `cutlass_op` provide a supplementary optimization):
 
 ```python
-from colossalai.shardformer import ShardConfig, Shard
+from colossalai.shardformer import ShardConfig, ShardFormer
 from transformers import BertForMaskedLM
+import colossalai
 
 # launch colossalai
 colossalai.launch_from_torch()
@@ -44,13 +45,43 @@ config = BertConfig.from_pretrained('bert-base-uncased')
 model = BertForMaskedLM.from_pretrained('bert-base-uncased', config=config)
 
 # create huggingface model as normal
-shard_config = ShardConfig()
+shard_config = ShardConfig(tensor_parallel_process_group=tp_group,
+                        pipeline_stage_manager=stage_manager,
+                        enable_tensor_parallelism=True,
+                        enable_fused_normalization=True,
+                        enable_flash_attention=True,
+                        enable_jit_fused=True,
+                        enable_sequence_parallelism=True,
+                        enable_sequence_overlap=True)
+
 shard_former = ShardFormer(shard_config=shard_config)
-sharded_model = shard_former.optimize(model).to('cuda')
+sharded_model, shared_params = shard_former.optimize(model).to('cuda')
 
 # do everything like normal
 ...
 ```
+
+Following are the description `ShardConfig`'s arguments:
+
+- `tensor_parallel_process_group`: The process group of tensor parallelism, it's necessary when using tensor parallel. Defaults to None, which is the global process group.
+
+- `pipeline_stage_manager`: If using pipeline parallelism, it's necessary to specify a pipeline stage manager for inter-process communication in pipeline parallelism. Defaults to None, which means not using pipeline parallelism.
+
+- `enable_tensor_parallelism`: Whether to use tensor parallelism. Defaults to True.
+
+- `enable_fused_normalization`: Whether to use fused layernorm. Defaults to False.
+
+- `enable_flash_attention`:  Whether to switch on flash attention. Defaults to False.
+
+- `enable_jit_fused`: Whether to switch on JIT fused operators. Defaults to False.
+
+- `enable_sequence_parallelism`:  Whether to turn on sequence parallelism, which partitions non-tensor-parallel regions along the sequence dimension. Defaults to False.
+
+- `enable_sequence_overlap`: Whether to turn on sequence overlap, which overlap the computation and communication in sequence parallelism. It can only be used when `enable_sequence_parallelism` is True. Defaults to False.
+
+-  `enable_all_optimization`: Whether to turn on all optimization tools including `fused normalization`, `flash attention`, `JIT fused operators`, `sequence parallelism` and `sequence overlap`. Defaults to False.
+
+- `extra_kwargs`: A dict to store extra kwargs for ShardFormer.
 
 ### Write your own policy
 
@@ -82,29 +113,32 @@ We will follow this roadmap to develop Shardformer:
 - [x] API Implementation
 - [x] Unit Testing
 - [ ] Policy Implementation
-  - [ ] Hugging Face
-    - [ ] NLP
-      - [x] BERT
-      - [x] T5
-      - [x] LlaMa
-      - [x] GPT2
-      - [x] OPT
-      - [x] BLOOM
-      - [ ] GLM
-      - [ ] RoBERTa
-      - [ ] ALBERT
-      - [ ] ERNIE
-      - [ ] GPT Neo
-      - [ ] GPT-J
-    - [ ] CV
-      - [x] ViT
-      - [ ] BEiT
-      - [ ] SwinTransformer
-      - [ ] SwinTransformer V2
-    - [ ] Audio
-      - [ ] Whisper
-    - [ ] Multi-modal
-      - [ ] To be added
+
+|    model    | tensor parallel | pipeline parallel | lazy initialization | xformer | flash attn2 | jit fused operator | fused layernorm | sequence parallel | overlap |
+|:-----------:|:---------------:|:-----------------:|:-------------------:|:-------:|:-----------:|:------------------:|:---------------:|:-----------------:|:-------:|
+|    bert     |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [√]         |       [√]       |        [√]        |   [√]   |
+|     t5      |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [√]         |       [√]       |        [ ]        |   [ ]   |
+| llama V1/V2 |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [√]         |       [√]       |        [ ]        |   [ ]   |
+|    gpt2     |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [√]         |       [√]       |        [√]        |   [√]   |
+|     opt     |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [√]         |       [√]       |        [ ]        |   [ ]   |
+|    bloom    |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [√]         |       [√]       |        [√]        |   [√]   |
+|  chatglm2   |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [√]         |       [√]       |        [√]        |   [√]   |
+|     vit     |       [√]       |        [√]        |         [ ]         |   [√]   |     [√]     |        [√]         |       [√]       |        [ ]        |   [ ]   |
+|   whisper   |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [ ]         |       [√]       |        [ ]        |   [ ]   |
+|     sam     |       [√]       |        [ ]        |         [ ]         |   [√]   |     [√]     |        [√]         |       [√]       |        [ ]        |   [ ]   |
+|    blip2    |       [√]       |        [ ]        |         [ ]         |   [√]   |     [√]     |        [√]         |       [√]       |        [ ]        |   [ ]   |
+|   falcon    |       [√]       |        [√]        |         [√]         |   [√]   |     [√]     |        [ ]         |       [√]       |        [ ]        |   [ ]   |
+|   roberta   |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|   albert    |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|    ernie    |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|   gpt-neo   |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|    gpt-j    |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|    beit     |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|    swin     |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|   swin V2   |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|    qwen     |       [ ]       |        [ ]        |         [ ]         |   [ ]   |     [ ]     |        [ ]         |       [ ]       |        [ ]        |   [ ]   |
+|   mistral   |       [√]       |        [ ]        |         [ ]         |   [√]   |     [√]     |        [√]         |       [√]       |        [ ]        |   [ ]   |
+
 
 ## 💡 API Design
 
@@ -153,8 +187,8 @@ class ShardConfig:
 
     # Some possible future config fields
     tensor_parallel_mode: Choice['1d', '2d', '2.5d', '3d'] # support different tensor parallel mode
-    inference_only: bool # only inject inference-suitable sharding policy
     use_flash_attention: bool # whether to use flash attention to speed up attention
+    extra_kwargs: Dict[str, Any] # extra kwargs for the shardformer
 ```
 
 ### Policy
@@ -203,6 +237,14 @@ class SubModuleReplacementDescription:
 
 
 class Policy(ABC):
+    r"""
+    The base class for all the policies. For each different model, it should have a different policy class,
+    like BertPolicy for Bert Model or OPTPolicy for OPT model.
+
+    Shardformer has provided many built-in sharding policies for the mainstream models. You can use the
+    built-in policies by setting `policy = None`, which is already the default argument for `Shardformer.optimize`.
+    If you want to define your own policy, you can inherit from this class and overwrite the methods you want to modify.
+    """
 
     def __init__(self)
         self.model = None
@@ -212,6 +254,16 @@ class Policy(ABC):
         Set model as an attribute of the Policy object so that we can access the model's attributes.
         """
         self.model = model
+
+    def set_shard_config(self, shard_config: ShardConfig) -> None:
+        r"""
+        Set shard config as an attribute of the Policy object.
+        Args:
+            shard_config (:class:`ShardConfig`): The shard config to be perform
+        """
+        self.shard_config = shard_config
+
+        self.config_sanity_check()
 
     @abstractmethod
     def preprocess(self) -> nn.Module:
@@ -271,41 +323,36 @@ class ShardFormer:
 
     Example:
 
+    org_model = BertForMaskedLM.from_pretrained('bert-base-uncased')
+    shard_config = ShardConfig()
     shard_former = ShardFormer(shard_config=shard_config)
-    shard_former.init_distributed()
-    model = shard_former.optimize(model, policy=policy)
-    dataloader = shard_former.shard_dataset(dataset)
+    model, shared_params = shard_former.optimize(org_model)
 
     """
 
     def __init__(self, shard_config: ShardConfig):
         """
         Do two things:
-        1. Create a colossalai.cluster.process_group_manager to manage process groups for dp, tp and pp
+        1. Create a distribute coordinator
         2. serve as a store for shard config
         """
         self.shard_config = shard_config
-        self.pg_manager = None
+        self.coordinator = DistCoordinator()
 
-    def init_distributed(self) -> colossalai.cluster.ProcessGroupManager:
-        """
-        Initialize the distributed process group according to the
-        """
-        pg_manager = ...
-        self.pg_manager = pg_manager
-        return pg_manager
+    def optimize(self, model: nn.Module, policy: Policy = None) -> Tuple[nn.Module, List[Dict[int, Tensor]]]:
+        r"""
+        This method will optimize the model based on the given policy.
 
-    def shard_model(self, model: torch.nn.Module，policy: Policy) -> torch.nn.Module:
-        """
-        Shard model for TP and PP
-        """
-        ...
+        Args:
+            model (`torch.nn.Model`): the origin huggingface model
+            shard_config (`ShardConfig`): the config for distribute information
+            policy (`Policy`): the custom policy for sharding
 
-    def shard_dataset(self, dataset: Dataset) -> Dataloader:
+        Returns: the sharded model and the shared parameters
         """
-        Shard dataset for DP
-        """
-        ...
+        sharder = ModelSharder(model=model, shard_config=self.shard_config, policy=policy)
+        shared_params = sharder.shard()
+        return model, shared_params
 ```
 
 ## ⌨️ Development Notes
@@ -344,6 +391,43 @@ _POLICY_LIST = {
 }
 ```
 
+#### How to support those models in huggingface model hub but not in the transformers library
+
+There are two cases:
+
+1. the modeling file is in the `transformers` library but the model weight is not in the `transformers` library. E.g. model structure of "01-ai/Yi-34B" is the same as LLaMA but the weight is not in the `transformers` library. In this case, we should support llama as usual and Yi-34B is also supported by the llama policy. We do not need to add a new policy for Yi-34B.
+2. the modeling file is not in the `transformers` library, such as the "THUDM/chatglm2-6b".
+
+Take "THUDM/chatglm2-6b" as an example, we clearly illustrate how to support this model in the `shardformer`.
+
+Unlike llama which is in `transformers` library, we cannot import chatglm2 model directly. Thus, the key in policy should be str of class name, rather than class itself.
+
+E.g. for llama:
+```python
+policy[LlamaDecoderLayer] = ModulePolicyDescription(...)
+```
+
+for chatglm2:
+```python
+policy["GLMBlock"] = ModulePolicyDescription(...)
+```
+
+Then when registering such models in the autopolicy, we should follow below format:
+```python
+"transformers_modules.<modeling_filename>.<class_name>": PolicyLocation(
+    file_name="<policy_filename>", class_name="<policy_class_name>"
+)
+```
+
+As for chatglm2 model, it should be:
+```python
+"transformers_modules.modeling_chatglm.ChatGLMForConditionalGeneration": PolicyLocation(
+    file_name="chatglm2", class_name="ChatGLMForConditionalGenerationPolicy"
+)
+```
+
+When using such models, `AutoModel` is supported as usual. The policy will be automatically loaded by the autopolicy.
+
 ### Write Your Unit Testing
 
 This section serves as the guideline for testing the `shardformer` module.
@@ -372,16 +456,66 @@ pytest tests/test_shardformer
 
 ### System Performance
 
-To be added.
+We conducted [benchmark tests](./examples/performance_benchmark.py) to evaluate the performance improvement of Shardformer. We compared the training time between the original model and the shard model.
+
+We set the batch size to 4, the number of attention heads to 8, and the head dimension to 64. 'N_CTX' refers to the sequence length.
+
+In the case of using 2 GPUs, the training times are as follows.
+| N_CTX | org_model | shard_model |
+|:-----:|:---------:|:-----------:|
+|  256  |  11.2ms   |   17.2ms    |
+|  512  |   9.8ms   |   19.5ms    |
+| 1024  |  19.6ms   |   18.9ms    |
+| 2048  |  46.6ms   |   30.8ms    |
+| 4096  |  160.5ms  |   90.4ms    |
+
+
+<p align="center">
+   <img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/colossalai/img/shardformer/performance_benchmark_gpus2.png" width="600" />
+   <br/>
+</p>
+
+In the case of using 4 GPUs, the training times are as follows.
+
+| N_CTX | org_model | shard_model |
+|:-----:|:---------:|:-----------:|
+|  256  |  10.0ms   |   21.1ms    |
+|  512  |  11.5ms   |   20.2ms    |
+| 1024  |  22.1ms   |   20.6ms    |
+| 2048  |  46.9ms   |   24.8ms    |
+| 4096  |  160.4ms  |   68.0ms    |
+
+
+
+<p align="center">
+   <img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/colossalai/img/shardformer/performance_benchmark_gpus4.png" width="600" />
+   <br/>
+</p>
+
+
+As shown in the figures above, when the sequence length is around 1000 or greater, the parallel optimization of Shardformer for long sequences starts to become evident.
 
 ### Convergence
 
-To validate that training the model using shardformers does not impact its convergence. We [fine-tuned the BERT model](./examples/shardformer_benchmark.py) using both shardformer and non-shardformer approaches. We compared the accuracy, loss, F1 score of the training results.
 
-| accuracy |   f1    |  loss   | GPU number | model shard |
-| :------: | :-----: | :-----: | :--------: | :---------: |
-| 0.82594  | 0.87441 | 0.09913 |     4      |    True     |
-| 0.81884  | 0.87299 | 0.10120 |     2      |    True     |
-| 0.81855  | 0.87124 | 0.10357 |     1      |    False    |
+To validate that training the model using shardformers does not impact its convergence. We [fine-tuned the BERT model](./examples/convergence_benchmark.py) using both shardformer and non-shardformer approaches. The example that utilizes Shardformer simultaneously with Pipeline Parallelism and Data Parallelism (Zero1). We then compared the accuracy, loss, and F1 score of the training results.
+
+the configurations are as follows:
+```python
+batch_size = 2
+epoch = 3
+lr = 2.4e-5
+accumulation_steps = 8
+warmup_fraction = 0.03
+```
+
+
+
+| accuracy |   f1    |  loss   | GPU number | model sharded |
+|:--------:|:-------:|:-------:|:----------:|:-------------:|
+| 0.82971  | 0.87713 | 0.23194 |     4      |     True      |
+| 0.83797  | 0.88006 | 0.22683 |     2      |     True      |
+| 0.84521  | 0.88700 | 0.21822 |     1      |     False     |
+
 
 Overall, the results demonstrate that using shardformers during model training does not affect the convergence.

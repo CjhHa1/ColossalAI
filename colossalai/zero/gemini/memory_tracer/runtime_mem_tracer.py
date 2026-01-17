@@ -1,19 +1,14 @@
 import torch.nn
 
-from colossalai.nn.parallel.data_parallel import _cast_float
 from colossalai.tensor.param_op_hook import ColoParamOpHookManager
-from colossalai.zero.legacy.gemini.ophooks.runtime_mem_tracer_hook import (
-    GradMemStats,
-    GradMemTracerHook,
-    ParamMemTracerHook,
-)
+from colossalai.utils import _cast_float
 
 from .memory_stats import MemStats
 
-__all__ = ['RuntimeMemTracer']
+__all__ = ["RuntimeMemTracer"]
 
 
-class RuntimeMemTracer():
+class RuntimeMemTracer:
     """RuntimeMemTracer for the module training using ColoParameter.
 
     Trace non-model memory usage during fwd+bwd process.
@@ -27,6 +22,12 @@ class RuntimeMemTracer():
 
     def __init__(self, module: torch.nn.Module, dtype: torch.dtype = torch.half):
         super().__init__()
+        from colossalai.legacy.zero.gemini.ophooks.runtime_mem_tracer_hook import (
+            GradMemStats,
+            GradMemTracerHook,
+            ParamMemTracerHook,
+        )
+
         self.module = module
         self.dtype = dtype
         self._gradstat = GradMemStats()

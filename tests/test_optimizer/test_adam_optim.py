@@ -8,57 +8,43 @@ from torch.optim import Adam, AdamW
 
 from colossalai.nn.optimizer import CPUAdam, FusedAdam, HybridAdam
 from tests.kit.model_zoo import model_zoo
+from tests.test_optimizer._utils import force_assign_grad, setup_param_groups
 
 _ALLOWED_OPTIM_DEVICES = [
-    (FusedAdam, torch.device('cuda:0')),
-    (CPUAdam, torch.device('cpu')),
-    (CPUAdam, torch.device('cuda:0')),
-    (HybridAdam, torch.device('cpu')),
-    (HybridAdam, torch.device('cuda:0')),
+    (FusedAdam, torch.device("cuda:0")),
+    (CPUAdam, torch.device("cpu")),
+    (CPUAdam, torch.device("cuda:0")),
+    (HybridAdam, torch.device("cpu")),
+    (HybridAdam, torch.device("cuda:0")),
 ]
 
 _ALLOWED_P_G_TYPES = [
-    (torch.float, torch.float),    # pure fp32
-    (torch.float, torch.half),    # fp16 amp
-    (torch.float, torch.bfloat16),    # bfloat16 amp
-    # (torch.half, torch.half),  # FIXME(ver217): cpu adam kernel does not support pure fp16
-    # (torch.bfloat16, torch.bfloat16),  # FIXME(ver217): cpu adam kernel does not support pure bfloat16
+    (torch.float, torch.float),  # pure fp32
+    (torch.float, torch.half),  # fp16 amp
+    (torch.float, torch.bfloat16),  # bfloat16 amp
 ]
 
 N_STEPS = 3
-
-
-def setup_param_groups(bert_model: nn.Module) -> list:
-    no_decay = ["bias", "LayerNorm.weight"]
-    optimizer_grouped_parameters = [
-        {
-            "params": [p for n, p in bert_model.named_parameters() if not any(nd in n for nd in no_decay)],
-            "weight_decay": 0.1,
-        },
-        {
-            "params": [p for n, p in bert_model.named_parameters() if any(nd in n for nd in no_decay)],
-            "weight_decay": 0.0,
-        },
-    ]
-    return optimizer_grouped_parameters
 
 
 def set_grad(model: nn.Module, torch_model: nn.Module, g_dtype: torch.dtype) -> None:
     for p, torch_p in zip(model.parameters(), torch_model.parameters()):
         torch_p.grad = torch.rand_like(torch_p)
         # avoid inconsistent grad and param dtype error
-        orig_p = p.data
-        p.data = torch_p.grad.clone().to(g_dtype)
-        p.grad = p.data
-        p.data = orig_p
+        force_assign_grad(p, g_dtype, torch_p.grad)
 
 
-@pytest.mark.parametrize('optim_cls, device', _ALLOWED_OPTIM_DEVICES)
-@pytest.mark.parametrize('adamw', [False, True])
-@pytest.mark.parametrize('p_dtype, g_dtype', _ALLOWED_P_G_TYPES)
-def test_adam_optim_on_bert(optim_cls: Union[Type[FusedAdam], Type[CPUAdam], Type[HybridAdam]], device: torch.device,
-                            adamw: bool, p_dtype: torch.dtype, g_dtype: torch.dtype) -> None:
-    model_fn, *_ = next(iter(model_zoo.get_sub_registry('transformers_bert_for_sequence_classification').values()))
+@pytest.mark.parametrize("optim_cls, device", _ALLOWED_OPTIM_DEVICES)
+@pytest.mark.parametrize("adamw", [False, True])
+@pytest.mark.parametrize("p_dtype, g_dtype", _ALLOWED_P_G_TYPES)
+def test_adam_optim_on_bert(
+    optim_cls: Union[Type[FusedAdam], Type[CPUAdam], Type[HybridAdam]],
+    device: torch.device,
+    adamw: bool,
+    p_dtype: torch.dtype,
+    g_dtype: torch.dtype,
+) -> None:
+    model_fn, *_ = next(iter(model_zoo.get_sub_registry("transformers_bert_for_sequence_classification").values()))
     torch_model = model_fn().to(device)
     model = deepcopy(torch_model).to(p_dtype)
     lr = 1e-3

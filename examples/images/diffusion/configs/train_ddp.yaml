@@ -1,5 +1,6 @@
 model:
   base_learning_rate: 1.0e-4
+  target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     parameterization: "v"
     linear_start: 0.00085
@@ -80,14 +81,12 @@ data:
 
 lightning:
   trainer:
-    accelerator: 'gpu' 
+    accelerator: 'gpu'
     devices: 8
     log_gpu_memory: all
     max_epochs: 2
     precision: 16
     auto_select_gpus: False
-    strategy:
-      find_unused_parameters: False
     log_every_n_steps: 2
 #    max_steps: 6o
     logger: True

@@ -13,7 +13,7 @@
 
 ## 📚 Overview
 
-This tutorial folder contains a simple demo to run auto-parallelism with ResNet. Meanwhile, this diretory also contains demo scripts to run automatic activation checkpointing, but both features are still experimental for now and no guarantee that they will work for your version of Colossal-AI.
+This tutorial folder contains a simple demo to run auto-parallelism with ResNet. Meanwhile, this directory also contains demo scripts to run automatic activation checkpointing, but both features are still experimental for now and no guarantee that they will work for your version of Colossal-AI.
 
 ## 🚀 Quick Start
 
@@ -49,7 +49,7 @@ You should expect to the log like this. This log shows the edge cost on the comp
 
 ### Auto-Checkpoint Tutorial
 
-We prepare two bechmarks for you to test the performance of auto checkpoint
+We prepare two benchmarks for you to test the performance of auto checkpoint
 
 The first test `auto_ckpt_solver_test.py` will show you the ability of solver to search checkpoint strategy that could fit in the given budget (test on GPT2 Medium and ResNet 50). It will output the benchmark summary and data visualization of peak memory vs. budget memory and relative step time vs. peak memory.
 

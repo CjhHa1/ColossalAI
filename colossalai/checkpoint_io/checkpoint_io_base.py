@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -8,10 +8,11 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler as LRScheduler
 
 from colossalai.interface import ModelWrapper
+from colossalai.logging import get_dist_logger
 
-from .utils import has_index_file
+from .utils import SAFE_WEIGHTS_NAME, WEIGHTS_NAME, has_index_file
 
-__all__ = ['CheckpointIO']
+__all__ = ["CheckpointIO"]
 
 
 class CheckpointIO(ABC):
@@ -61,10 +62,36 @@ class CheckpointIO(ABC):
     # ======================================
     # Public methods
     # ======================================
-    def load_model(self,
-                   model: Union[nn.Module, ModelWrapper],
-                   checkpoint: str,
-                   strict: bool = True) -> Union[nn.Module, ModelWrapper]:
+    def __init__(self):
+        super().__init__()
+        self.pinned_state_dicts: Dict[int, dict] = {}
+        self.async_writers = []
+
+    def _sync_io(self):
+        for writer in self.async_writers:
+            writer.synchronize()
+        self.async_writers.clear()
+
+    def _sync_d2h(self):
+        for writer in self.async_writers:
+            writer.sync_before_step()
+
+    def synchronize(self):
+        """This method must be called before updating the model weights."""
+        self._sync_d2h()
+
+    def __del__(self):
+        self._sync_d2h()
+        self._sync_io()
+
+    def load_model(
+        self,
+        model: Union[nn.Module, ModelWrapper],
+        checkpoint: str,
+        strict: bool = True,
+        low_cpu_mem_mode: bool = True,
+        num_threads: int = 1,
+    ) -> Union[nn.Module, ModelWrapper]:
         """
         Load model from checkpoint.
 
@@ -78,6 +105,8 @@ class CheckpointIO(ABC):
                         Distributed tensors cannot be loaded directly unless gathered offline via our CLI.
             strict (bool): whether to strictly enforce that the param name in
                 the checkpoint match the keys returned by this module's.
+            low_cpu_mem_mode (bool): whether to load the model in low cpu memory mode. If false, it will use RAM cache to accelerate loading. Default: True.
+            num_threads (int): number of threads to use when loading the model. Only useful when disabling low cpu mem mode. Default: 1.
         """
         # since we only support loaded sharded and unsharded weight format
         # containing no distributed tensors, dtensor -> full tensor conversion
@@ -88,24 +117,40 @@ class CheckpointIO(ABC):
         # return the origin model instead of the unwrapped model
         origin_model = model
 
-        if isinstance(model, ModelWrapper):
-            model = model.unwrap()
-
         if index_file_exists:
-            self.load_sharded_model(model, index_file_path, strict)
+            self.load_sharded_model(
+                model, index_file_path, strict, low_cpu_mem_mode=low_cpu_mem_mode, num_threads=num_threads
+            )
         else:
-            self.load_unsharded_model(model, checkpoint, strict)
+            path = Path(checkpoint, SAFE_WEIGHTS_NAME)
+            if path.is_file():
+                self.load_unsharded_model(
+                    model, str(path), strict, low_cpu_mem_mode=low_cpu_mem_mode, num_threads=num_threads
+                )
+            else:
+                path = Path(checkpoint, WEIGHTS_NAME)
+                if path.is_file():
+                    self.load_unsharded_model(
+                        model, str(path), strict, low_cpu_mem_mode=low_cpu_mem_mode, num_threads=num_threads
+                    )
+                else:
+                    self.load_unsharded_model(
+                        model, checkpoint, strict, low_cpu_mem_mode=low_cpu_mem_mode, num_threads=num_threads
+                    )
 
         return origin_model
 
-    def save_model(self,
-                   model: Union[nn.Module, ModelWrapper],
-                   checkpoint: str,
-                   shard: bool = False,
-                   gather_dtensor: bool = True,
-                   prefix: str = None,
-                   size_per_shard: int = 1024,
-                   use_safetensors: bool = False):
+    def save_model(
+        self,
+        model: Union[nn.Module, ModelWrapper],
+        checkpoint: str,
+        shard: bool = False,
+        gather_dtensor: bool = True,
+        prefix: str = None,
+        size_per_shard: int = 1024,
+        use_safetensors: bool = False,
+        use_async: bool = False,
+    ):
         """
         Save model to checkpoint.
 
@@ -132,16 +177,30 @@ class CheckpointIO(ABC):
             size_per_shard (int): size per shard in MB. Default: 1024. This value is only used when shard = True.
             use_safetensors (bool): whether to use safe tensors. Default: False. If set to True, the checkpoint will be saved
         """
-
-        if isinstance(model, ModelWrapper):
-            model = model.unwrap()
+        self._sync_io()
+        if use_async and not use_safetensors:
+            logger = get_dist_logger()
+            logger.warning(
+                "Async save is only supported when use_safetensors is set to True. "
+                "Setting use_safetensors to True for async save."
+            )
+            use_safetensors = True
 
         if shard:
-            self.save_sharded_model(model, checkpoint, gather_dtensor, prefix, size_per_shard, use_safetensors)
+            self.save_sharded_model(
+                model, checkpoint, gather_dtensor, prefix, size_per_shard, use_safetensors, use_async
+            )
         else:
-            self.save_unsharded_model(model, checkpoint, gather_dtensor, use_safetensors)
+            self.save_unsharded_model(model, checkpoint, gather_dtensor, use_safetensors, use_async)
 
-    def load_optimizer(self, optimizer: Optimizer, checkpoint: str, prefix: str = None, size_per_shard: int = 1024):
+    def load_optimizer(
+        self,
+        optimizer: Optimizer,
+        checkpoint: str,
+        prefix: str = None,
+        low_cpu_mem_mode: bool = True,
+        num_threads: int = 1,
+    ):
         """
         Load optimizer from checkpoint.
 
@@ -150,28 +209,36 @@ class CheckpointIO(ABC):
             checkpoint (str): checkpoint path. This value is made compatibility with the model checkpoints in the
             prefix (str, optional): A prefix added to parameter and buffer
                 names to compose the keys in state_dict. Defaults to None.
-            size_per_shard (int, optional): Maximum size of checkpoint shard file in MB. This is useful only when ``shard=True``. Defaults to 1024.
+            low_cpu_mem_mode (bool): whether to load the model in low cpu memory mode. If false, it will use RAM cache to accelerate loading. Default: True.
+            num_threads (int): number of threads to use when loading the model. Only useful when disabling low cpu mem mode. Default: 1.
         """
 
         index_file_exists, index_file_path = has_index_file(checkpoint)
 
         if Path(checkpoint).is_dir() and not index_file_exists:
             # if the checkpoint is a directory and there is no index file, raise error
-            raise ValueError(f'Cannot find index file in {checkpoint}')
+            raise ValueError(f"Cannot find index file in {checkpoint}")
 
         if index_file_exists:
             # the existence of index file means it is a sharded checkpoint
-            self.load_sharded_optimizer(optimizer, index_file_path, prefix)
+            self.load_sharded_optimizer(
+                optimizer, index_file_path, prefix, low_cpu_mem_mode=low_cpu_mem_mode, num_threads=num_threads
+            )
         else:
-            self.load_unsharded_optimizer(optimizer, checkpoint)
+            self.load_unsharded_optimizer(
+                optimizer, checkpoint, low_cpu_mem_mode=low_cpu_mem_mode, num_threads=num_threads
+            )
 
-    def save_optimizer(self,
-                       optimizer: Optimizer,
-                       checkpoint: str,
-                       shard: bool = False,
-                       gather_dtensor=True,
-                       prefix: str = None,
-                       size_per_shard: int = 1024):
+    def save_optimizer(
+        self,
+        optimizer: Optimizer,
+        checkpoint: str,
+        shard: bool = False,
+        gather_dtensor=True,
+        prefix: str = None,
+        size_per_shard: int = 1024,
+        use_async: bool = False,
+    ):
         """
         Save optimizer to checkpoint. Optimizer states saving is not compatible with safetensors.
 
@@ -187,17 +254,20 @@ class CheckpointIO(ABC):
             prefix (str): prefix for the optimizer checkpoint when shard = True. Default: None.
             size_per_shard (int): size per shard in MB. Default: 1024. This value is only used when shard is set to True.
         """
-
         if shard:
-            self.save_sharded_optimizer(optimizer, checkpoint, gather_dtensor, prefix, size_per_shard)
+            self.save_sharded_optimizer(
+                optimizer, checkpoint, gather_dtensor, prefix, size_per_shard, use_async=use_async
+            )
         else:
-            self.save_unsharded_optimizer(optimizer, checkpoint, gather_dtensor)
+            self.save_unsharded_optimizer(optimizer, checkpoint, gather_dtensor, use_async=use_async)
 
     # ========================================================
     # Abstract methods for model loading/saving implementation
     # ========================================================
     @abstractmethod
-    def load_sharded_model(self, model: nn.Module, index_file_path: str, strict: bool):
+    def load_sharded_model(
+        self, model: nn.Module, index_file_path: str, strict: bool, low_cpu_mem_mode: bool = True, num_threads: int = 1
+    ):
         """
         Load model from sharded checkpoint.
 
@@ -206,11 +276,14 @@ class CheckpointIO(ABC):
             index_file_path (str): checkpoint path. It should be path to the .index.json file or a path to a directory which contains a .index.json file.
             strict (bool): whether to strictly enforce that the param name in
                 the checkpoint match the keys returned by this module's.
+            low_cpu_mem_mode (bool): whether to load the model in low cpu memory mode. If false, it will use RAM cache to accelerate loading. Default: True.
+            num_threads (int): number of threads to use when loading the model. Only useful when disabling low cpu mem mode. Default: 1.
         """
-        pass
 
     @abstractmethod
-    def load_unsharded_model(self, model: nn.Module, checkpoint: str, strict: bool):
+    def load_unsharded_model(
+        self, model: nn.Module, checkpoint: str, strict: bool, low_cpu_mem_mode: bool = True, num_threads: int = 1
+    ):
         """
         Load model from unsharded checkpoint.
 
@@ -219,12 +292,21 @@ class CheckpointIO(ABC):
             checkpoint (str): checkpoint path. It should be a single file path pointing to a model weight binary.
             strict (bool): whether to strictly enforce that the param name in
                 the checkpoint match the keys returned by this module's.
+            low_cpu_mem_mode (bool): whether to load the model in low cpu memory mode. If false, it will use RAM cache to accelerate loading. Default: True.
+            num_threads (int): number of threads to use when loading the model. Only useful when disabling low cpu mem mode. Default: 1.
         """
-        pass
 
     @abstractmethod
-    def save_sharded_model(self, model: nn.Module, checkpoint: str, gather_dtensor: bool, prefix: Optional[str],
-                           size_per_shard: int, use_safetensors: bool):
+    def save_sharded_model(
+        self,
+        model: nn.Module,
+        checkpoint: str,
+        gather_dtensor: bool,
+        prefix: Optional[str],
+        size_per_shard: int,
+        use_safetensors: bool,
+        use_async: bool = False,
+    ):
         """
         Save model to sharded checkpoint.
 
@@ -236,10 +318,11 @@ class CheckpointIO(ABC):
             size_per_shard (int): size per shard in MB.
             use_safetensors (bool): whether to use safe tensors.
         """
-        pass
 
     @abstractmethod
-    def save_unsharded_model(self, model: nn.Module, checkpoint: str, gather_dtensor: bool, use_safetensors: bool):
+    def save_unsharded_model(
+        self, model: nn.Module, checkpoint: str, gather_dtensor: bool, use_safetensors: bool, use_async: bool = False
+    ):
         """
         Save model to unsharded checkpoint.
 
@@ -249,14 +332,20 @@ class CheckpointIO(ABC):
             gather_dtensor (bool): whether to gather the distributed tensor to the first device.
             use_safetensors (bool): whether to use safe tensors.
         """
-        pass
 
     # ========================================================
     # Abstract methods for optimizer loading/saving implementation
     # ========================================================
 
     @abstractmethod
-    def load_sharded_optimizer(self, optimizer: Optimizer, index_file_path: str, prefix: str):
+    def load_sharded_optimizer(
+        self,
+        optimizer: Optimizer,
+        index_file_path: str,
+        prefix: str,
+        low_cpu_mem_mode: bool = True,
+        num_threads: int = 1,
+    ):
         """
         Load optimizer from sharded checkpoint.
 
@@ -264,23 +353,34 @@ class CheckpointIO(ABC):
             optimizer (Optimizer): optimizer to be loaded.
             index_file_path (str): checkpoint path. It should be path to the .index.json file or a path to a directory which contains a .index.json file.
             prefix (str): prefix for the optimizer checkpoint.
+            low_cpu_mem_mode (bool): whether to load the model in low cpu memory mode. If false, it will use RAM cache to accelerate loading. Default: True.
+            num_threads (int): number of threads to use when loading the model. Only useful when disabling low cpu mem mode. Default: 1.
         """
-        pass
 
     @abstractmethod
-    def load_unsharded_optimizer(self, optimizer: Optimizer, checkpoint: Path):
+    def load_unsharded_optimizer(
+        self, optimizer: Optimizer, checkpoint: Path, low_cpu_mem_mode: bool = True, num_threads: int = 1
+    ):
         """
         Load optimizer from unsharded checkpoint.
 
         Args:
             optimizer (Optimizer): optimizer to be loaded.
             checkpoint (str): checkpoint path. It should be a single file path pointing to a model weight binary.
+            low_cpu_mem_mode (bool): whether to load the model in low cpu memory mode. If false, it will use RAM cache to accelerate loading. Default: True.
+            num_threads (int): number of threads to use when loading the model. Only useful when disabling low cpu mem mode. Default: 1.
         """
-        pass
 
     @abstractmethod
-    def save_sharded_optimizer(self, optimizer: Optimizer, checkpoint: Path, gather_dtensor: bool, prefix: str,
-                               size_per_shard: int):
+    def save_sharded_optimizer(
+        self,
+        optimizer: Optimizer,
+        checkpoint: Path,
+        gather_dtensor: bool,
+        prefix: str,
+        size_per_shard: int,
+        use_async: bool = False,
+    ):
         """
         Save optimizer to sharded checkpoint.
 
@@ -291,10 +391,11 @@ class CheckpointIO(ABC):
             prefix (str): prefix for the optimizer checkpoint.
             size_per_shard (int): size per shard in MB.
         """
-        pass
 
     @abstractmethod
-    def save_unsharded_optimizer(self, optimizer: Optimizer, checkpoint: Path, gather_dtensor: bool):
+    def save_unsharded_optimizer(
+        self, optimizer: Optimizer, checkpoint: Path, gather_dtensor: bool, use_async: bool = False
+    ):
         """
         Save optimizer to unsharded checkpoint.
 
@@ -303,7 +404,6 @@ class CheckpointIO(ABC):
             checkpoint (str): checkpoint path. It should be a single file path pointing to a model weight binary.
             gather_dtensor (bool): whether to gather the distributed tensor to the first device.
         """
-        pass
 
     # ============================================
     # methods for loading and saving lr scheduler
@@ -330,3 +430,25 @@ class CheckpointIO(ABC):
         """
         state_dict = torch.load(checkpoint)
         lr_scheduler.load_state_dict(state_dict)
+
+    # ================================================================================
+    # Abstract method for lora saving implementation.
+    # ================================================================================
+
+    @abstractmethod
+    def save_lora_as_pretrained(
+        self,
+        model: Union[nn.Module, ModelWrapper],
+        checkpoint: str,
+        use_safetensors: bool = False,
+        state_dict: Optional[dict] = None,
+    ) -> None:
+        """
+        Save the lora adapters and adapter configuration file to a pretrained checkpoint directory.
+
+        Args:
+            model (Union[nn.Module, ModelWrapper]): A model boosted by Booster.
+            checkpoint (str): Path to the checkpoint directory. It must be a local path.
+            use_safetensors (bool, optional): Whether to use safe tensors when saving. Defaults to False.
+            state_dict (Optional[dict], optional): The state dict to save. Defaults to None.
+        """

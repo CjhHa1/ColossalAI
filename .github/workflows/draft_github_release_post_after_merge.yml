@@ -12,14 +12,14 @@ jobs:
   release:
     name: Draft Release Post
     if: ( github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true ) && github.repository == 'hpcaitech/ColossalAI'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ubuntu-latest]
     steps:
       - uses: actions/checkout@v2
         with:
           fetch-depth: 0
       - uses: actions/setup-python@v2
         with:
-          python-version: '3.8.14'
+          python-version: '3.9'
       - name: generate draft
         id: generate_draft
         run: |

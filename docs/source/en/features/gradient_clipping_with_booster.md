@@ -1,9 +1,8 @@
-# Gradient Clipping (Latest)
+# Gradient Clipping
 
 Author: [Mingyan Jiang](https://github.com/jiangmingyan)
 
 **Prerequisite**
-- [Define Your Configuration](../basics/define_your_config.md)
 - [Training Booster](../basics/booster_api.md)
 
 **Related Paper**
@@ -62,7 +61,7 @@ We then need to initialize distributed environment. For demo purpose, we uses `l
 for other initialization methods.
 
 ```python
-colossalai.launch_from_torch(config=dict())
+colossalai.launch_from_torch()
 logger = get_dist_logger()
 ```
 

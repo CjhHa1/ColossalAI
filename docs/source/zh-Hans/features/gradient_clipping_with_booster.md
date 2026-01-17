@@ -1,9 +1,8 @@
-# 梯度裁剪 (新版本)
+# 梯度裁剪
 
 作者: [Mingyan Jiang](https://github.com/jiangmingyan)
 
 **前置教程**
-- [定义配置文件](../basics/define_your_config.md)
 - [booster使用](../basics/booster_api.md)
 
 **相关论文**
@@ -62,7 +61,7 @@ from colossalai.nn.lr_scheduler import CosineAnnealingLR
 我们需要初始化分布式环境. 为了快速演示，我们使用`launch_from_torch`. 您可以参考 [Launch Colossal-AI](../basics/launch_colossalai.md)
 
 ```python
-colossalai.launch_from_torch(config=dict())
+colossalai.launch_from_torch()
 logger = get_dist_logger()
 ```
 

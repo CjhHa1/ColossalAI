@@ -8,13 +8,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.testing import assert_close
 
 import colossalai
+from colossalai.cluster import ProcessGroupMesh
 from colossalai.testing import parameterize, rerun_if_address_is_in_use, spawn
 from colossalai.testing.random import seed_all
 from colossalai.zero import LowLevelZeroOptimizer
 
 
 class MlpModel(nn.Module):
-
     def __init__(self):
         super(MlpModel, self).__init__()
         self.linear1 = nn.Linear(12, 24)
@@ -37,16 +37,24 @@ def loose_close(a, b, dtype: torch.dtype = torch.float32):
         atol = 4e-3
 
     a = a.detach().to(dtype)
-    b = b.detach().to(dtype)
+    b = b.detach().to(dtype).to(a.device)
 
     assert_close(a, b, rtol=rtol, atol=atol)
 
 
-def exam_zero_1_torch_ddp_ckpt():
+@parameterize("extra_dp_size", [1, 2])
+def exam_zero_1_torch_ddp_ckpt(extra_dp_size: int):
     """
     We examine the state_dict of zero and DDP.
     Moreover, we examine the zero's loading checkpoint of a torch ckpt.
     """
+    if extra_dp_size > 1:
+        pg_mesh = ProcessGroupMesh(extra_dp_size, dist.get_world_size() // extra_dp_size)
+        extra_dp_group = pg_mesh.get_group_along_axis(0)
+        dp_group = pg_mesh.get_group_along_axis(1)
+    else:
+        dp_group = None
+        extra_dp_group = None
     local_rank = torch.distributed.get_rank()
     seed_all(1453)
 
@@ -61,10 +69,14 @@ def exam_zero_1_torch_ddp_ckpt():
 
     # we only test stage 1 here
     # the state dicts of stage 1 and stage 2 are the same
-    zero_optimizer = LowLevelZeroOptimizer(zero_optimizer,
-                                           overlap_communication=True,
-                                           initial_scale=1,
-                                           reduce_bucket_size=262144)
+    zero_optimizer = LowLevelZeroOptimizer(
+        zero_optimizer,
+        overlap_communication=True,
+        initial_scale=1,
+        reduce_bucket_size=262144,
+        dp_process_group=dp_group,
+        extra_dp_group=extra_dp_group,
+    )
 
     torch_optimizer = torch.optim.Adam(torch_model.parameters(), lr=1)
 
@@ -88,7 +100,7 @@ def exam_zero_1_torch_ddp_ckpt():
     zero_state_dict = zero_optimizer.state_dict()
 
     # examine the original state dict
-    for torch_state, zero_state in zip(torch_state_dict['state'].values(), zero_state_dict['state'].values()):
+    for torch_state, zero_state in zip(torch_state_dict["state"].values(), zero_state_dict["state"].values()):
         for t_v, z_v in zip(torch_state.values(), zero_state.values()):
             loose_close(t_v, z_v)
 
@@ -100,13 +112,13 @@ def exam_zero_1_torch_ddp_ckpt():
     zero_state_dict = zero_optimizer.state_dict()
 
     # examine the loaded state dict
-    for torch_state, zero_state in zip(torch_state_dict['state'].values(), zero_state_dict['state'].values()):
+    for torch_state, zero_state in zip(torch_state_dict["state"].values(), zero_state_dict["state"].values()):
         for t_v, z_v in zip(torch_state.values(), zero_state.values()):
             loose_close(t_v, z_v)
 
 
 def run_dist(rank, world_size, port):
-    colossalai.launch(config=dict(), rank=rank, world_size=world_size, port=port, host='localhost')
+    colossalai.launch(rank=rank, world_size=world_size, port=port, host="localhost")
 
     exam_zero_1_torch_ddp_ckpt()
 
@@ -114,8 +126,8 @@ def run_dist(rank, world_size, port):
 @pytest.mark.dist
 @rerun_if_address_is_in_use()
 def test_zero_ckpt():
-    spawn(run_dist, 2)
+    spawn(run_dist, 4)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_zero_ckpt()

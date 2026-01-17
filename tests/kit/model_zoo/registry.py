@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, List, Union
 
-__all__ = ['ModelZooRegistry', 'ModelAttribute', 'model_zoo']
+__all__ = ["ModelZooRegistry", "ModelAttribute", "model_zoo"]
 
 
 @dataclass
@@ -14,6 +14,7 @@ class ModelAttribute:
         has_control_flow (bool): Whether the model contains branching in its forward method.
         has_stochastic_depth_prob (bool): Whether the model contains stochastic depth probability. Often seen in the torchvision models.
     """
+
     has_control_flow: bool = False
     has_stochastic_depth_prob: bool = False
 
@@ -23,13 +24,15 @@ class ModelZooRegistry(dict):
     A registry to map model names to model and data generation functions.
     """
 
-    def register(self,
-                 name: str,
-                 model_fn: Callable,
-                 data_gen_fn: Callable,
-                 output_transform_fn: Callable,
-                 loss_fn: Callable = None,
-                 model_attribute: ModelAttribute = None):
+    def register(
+        self,
+        name: str,
+        model_fn: Callable,
+        data_gen_fn: Callable,
+        output_transform_fn: Callable,
+        loss_fn: Callable = None,
+        model_attribute: ModelAttribute = None,
+    ):
         """
         Register a model and data generation function.
 
@@ -58,7 +61,9 @@ class ModelZooRegistry(dict):
         """
         self[name] = (model_fn, data_gen_fn, output_transform_fn, loss_fn, model_attribute)
 
-    def get_sub_registry(self, keyword: str):
+    def get_sub_registry(
+        self, keyword: Union[str, List[str]], exclude: Union[str, List[str]] = None, allow_empty: bool = False
+    ):
         """
         Get a sub registry with models that contain the keyword.
 
@@ -67,11 +72,33 @@ class ModelZooRegistry(dict):
         """
         new_dict = dict()
 
-        for k, v in self.items():
-            if keyword in k:
-                new_dict[k] = v
+        if isinstance(keyword, str):
+            keyword_list = [keyword]
+        else:
+            keyword_list = keyword
+        assert isinstance(keyword_list, (list, tuple))
 
-        assert len(new_dict) > 0, f'No model found with keyword {keyword}'
+        if exclude is None:
+            exclude_keywords = []
+        elif isinstance(exclude, str):
+            exclude_keywords = [exclude]
+        else:
+            exclude_keywords = exclude
+        assert isinstance(exclude_keywords, (list, tuple))
+
+        for k, v in self.items():
+            for kw in keyword_list:
+                if kw in k:
+                    should_exclude = False
+                    for ex_kw in exclude_keywords:
+                        if ex_kw in k:
+                            should_exclude = True
+
+                    if not should_exclude:
+                        new_dict[k] = v
+
+        if not allow_empty:
+            assert len(new_dict) > 0, f"No model found with keyword {keyword}"
         return new_dict
 
 
